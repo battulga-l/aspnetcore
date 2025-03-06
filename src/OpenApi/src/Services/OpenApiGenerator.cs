@@ -20,6 +20,8 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Internal;
 using Microsoft.Extensions.Primitives;
 using Microsoft.OpenApi.Models;
+using Microsoft.OpenApi.Models.Interfaces;
+using Microsoft.OpenApi.Models.References;
 
 namespace Microsoft.AspNetCore.OpenApi;
 
@@ -32,8 +34,6 @@ internal sealed class OpenApiGenerator
 {
     private readonly IHostEnvironment? _environment;
     private readonly IServiceProviderIsService? _serviceProviderIsService;
-
-    internal static readonly ParameterBindingMethodCache ParameterBindingMethodCache = new();
 
     /// <summary>
     /// Creates an <see cref="OpenApiGenerator" /> instance given an <see cref="IHostEnvironment" />
@@ -259,7 +259,7 @@ internal sealed class OpenApiGenerator
         var hasFormOrBodyParameter = false;
         ParameterInfo? requestBodyParameter = null;
 
-        var parameters = PropertyAsParameterInfo.Flatten(methodInfo.GetParameters(), ParameterBindingMethodCache);
+        var parameters = PropertyAsParameterInfo.Flatten(methodInfo.GetParameters(), ParameterBindingMethodCache.Instance);
         foreach (var parameter in parameters)
         {
             var (bodyOrFormParameter, _, _) = GetOpenApiParameterLocation(parameter, pattern, disableInferredBody);
@@ -324,19 +324,22 @@ internal sealed class OpenApiGenerator
         return null;
     }
 
-    private List<OpenApiTag> GetOperationTags(MethodInfo methodInfo, EndpointMetadataCollection metadata)
+    private List<OpenApiTagReference> GetOperationTags(MethodInfo methodInfo, EndpointMetadataCollection metadata)
     {
         var metadataList = metadata.GetOrderedMetadata<ITagsMetadata>();
+        var document = new OpenApiDocument();
 
         if (metadataList.Count > 0)
         {
-            var tags = new List<OpenApiTag>();
+            var tags = new List<OpenApiTagReference>();
 
             foreach (var metadataItem in metadataList)
             {
                 foreach (var tag in metadataItem.Tags)
                 {
-                    tags.Add(new OpenApiTag() { Name = tag });
+                    document.Tags ??= [];
+                    document.Tags.Add(new OpenApiTag { Name = tag });
+                    tags.Add(new OpenApiTagReference(tag, document));
                 }
             }
 
@@ -356,13 +359,15 @@ internal sealed class OpenApiGenerator
             controllerName = _environment?.ApplicationName ?? string.Empty;
         }
 
-        return new List<OpenApiTag>() { new OpenApiTag() { Name = controllerName } };
+        document.Tags ??= [];
+        document.Tags.Add(new OpenApiTag { Name = controllerName });
+        return [new(controllerName, document)];
     }
 
-    private List<OpenApiParameter> GetOpenApiParameters(MethodInfo methodInfo, RoutePattern pattern, bool disableInferredBody)
+    private List<IOpenApiParameter> GetOpenApiParameters(MethodInfo methodInfo, RoutePattern pattern, bool disableInferredBody)
     {
-        var parameters = PropertyAsParameterInfo.Flatten(methodInfo.GetParameters(), ParameterBindingMethodCache);
-        var openApiParameters = new List<OpenApiParameter>();
+        var parameters = PropertyAsParameterInfo.Flatten(methodInfo.GetParameters(), ParameterBindingMethodCache.Instance);
+        var openApiParameters = new List<IOpenApiParameter>();
 
         foreach (var parameter in parameters)
         {
@@ -428,12 +433,12 @@ internal sealed class OpenApiGenerator
                 parameter.ParameterType == typeof(HttpResponse) ||
                 parameter.ParameterType == typeof(ClaimsPrincipal) ||
                 parameter.ParameterType == typeof(CancellationToken) ||
-                ParameterBindingMethodCache.HasBindAsyncMethod(parameter) ||
+                ParameterBindingMethodCache.Instance.HasBindAsyncMethod(parameter) ||
                 _serviceProviderIsService?.IsService(parameter.ParameterType) == true)
         {
             return (false, null, null);
         }
-        else if (parameter.ParameterType == typeof(string) || ParameterBindingMethodCache.HasTryParseMethod(parameter.ParameterType))
+        else if (parameter.ParameterType == typeof(string) || ParameterBindingMethodCache.Instance.HasTryParseMethod(parameter.ParameterType))
         {
             // Path vs query cannot be determined by RequestDelegateFactory at startup currently because of the layering, but can be done here.
             if (parameter.Name is { } name && pattern.GetParameter(name) is not null)
@@ -452,7 +457,7 @@ internal sealed class OpenApiGenerator
         else if (disableInferredBody && (
                  parameter.ParameterType == typeof(string[]) ||
                  parameter.ParameterType == typeof(StringValues) ||
-                 (parameter.ParameterType.IsArray && ParameterBindingMethodCache.HasTryParseMethod(parameter.ParameterType.GetElementType()!))))
+                 (parameter.ParameterType.IsArray && ParameterBindingMethodCache.Instance.HasTryParseMethod(parameter.ParameterType.GetElementType()!))))
         {
             return (false, ParameterLocation.Query, null);
         }

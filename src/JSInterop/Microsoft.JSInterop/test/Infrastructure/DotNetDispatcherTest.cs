@@ -273,7 +273,9 @@ public class DotNetDispatcherTest
 
         // Assert
         Assert.True(task.IsCompletedSuccessfully);
+#pragma warning disable xUnit1031 // Do not use blocking task operations in test method
         var result = task.Result;
+#pragma warning restore xUnit1031 // Do not use blocking task operations in test method
         Assert.Equal(testDTO.StringVal, result.StringVal);
         Assert.Equal(testDTO.IntVal, result.IntVal);
     }
@@ -407,7 +409,9 @@ public class DotNetDispatcherTest
 
         // Assert
         Assert.True(task.IsCompletedSuccessfully);
+#pragma warning disable xUnit1031 // Do not use blocking task operations in test method
         Assert.Equal(7, task.Result.IntVal);
+#pragma warning restore xUnit1031 // Do not use blocking task operations in test method
     }
 
     [Fact]
@@ -419,7 +423,9 @@ public class DotNetDispatcherTest
         DotNetDispatcher.EndInvokeJS(jsRuntime, $"[{jsRuntime.LastInvocationAsyncHandle}, true, [1, 2, 3]]");
 
         Assert.True(task.IsCompletedSuccessfully);
+#pragma warning disable xUnit1031 // Do not use blocking task operations in test method
         Assert.Equal(new[] { 1, 2, 3 }, task.Result);
+#pragma warning restore xUnit1031 // Do not use blocking task operations in test method
     }
 
     [Fact]
@@ -431,7 +437,9 @@ public class DotNetDispatcherTest
         DotNetDispatcher.EndInvokeJS(jsRuntime, $"[{jsRuntime.LastInvocationAsyncHandle}, true, null]");
 
         Assert.True(task.IsCompletedSuccessfully);
+#pragma warning disable xUnit1031 // Do not use blocking task operations in test method
         Assert.Null(task.Result);
+#pragma warning restore xUnit1031 // Do not use blocking task operations in test method
     }
 
     [Fact]
@@ -486,6 +494,42 @@ public class DotNetDispatcherTest
 
         // Assert
         Assert.Equal("\"hello world\"", resultJson);
+    }
+
+    
+    [Fact]
+    public void CanInvokeMethodsWithMultipleIdentifiers() {
+        var jsRuntime = new TestJSRuntime();
+        var targetInstance = new MultipleJSInvokableAttributes();
+        jsRuntime.Invoke<object>("_setup",
+            DotNetObjectReference.Create(targetInstance));
+        var argsJson = "[\"hello Alias\"]";
+
+        // Act
+        var resultJson = DotNetDispatcher.Invoke(jsRuntime, new DotNetInvocationInfo(null, "MultipleJSInvokableAttributesInstance", 1, default), argsJson);
+        var resultJson2 = DotNetDispatcher.Invoke(jsRuntime, new DotNetInvocationInfo(null, "Alias", 1, default), argsJson);
+
+        // Assert
+        Assert.Equal("\"hello Alias\"", resultJson);
+        Assert.Equal("\"hello Alias\"", resultJson2);
+    }
+    [Fact]
+    public void CanInvokeMethodsWithMultipleIdentifiers_Static()
+    {
+        // Arrange/Act
+        var jsRuntime = new TestJSRuntime();
+        var resultJson = DotNetDispatcher.Invoke(jsRuntime, new DotNetInvocationInfo(thisAssemblyName, "InvocableStaticNonVoidAlias1", default, default), null);
+        var result = JsonSerializer.Deserialize<TestDTO>(resultJson, jsRuntime.JsonSerializerOptions);
+
+        var resultJson2 = DotNetDispatcher.Invoke(jsRuntime, new DotNetInvocationInfo(thisAssemblyName, "InvocableStaticNonVoidAlias2", default, default), null);
+        var result2 = JsonSerializer.Deserialize<TestDTO>(resultJson2, jsRuntime.JsonSerializerOptions);
+
+        // Assert
+        Assert.Equal("Test", result.StringVal);
+        Assert.Equal(456, result.IntVal);
+
+        Assert.Equal("Test", result2.StringVal);
+        Assert.Equal(456, result2.IntVal);
     }
 
     [Fact]
@@ -866,6 +910,10 @@ public class DotNetDispatcherTest
         public static object MyInvocableNonVoid()
             => new TestDTO { StringVal = "Test", IntVal = 123 };
 
+        [JSInvokable("InvocableStaticNonVoidAlias1"), JSInvokable("InvocableStaticNonVoidAlias2")]
+        public static object MyInvocableNonVoidWithAlias()
+            => new TestDTO { StringVal = "Test", IntVal = 456 };
+
         [JSInvokable("InvocableStaticWithParams")]
         public static object[] MyInvocableWithParams(TestDTO dtoViaJson, int[] incrementAmounts, DotNetObjectReference<TestDTO> dtoByRef)
             => new object[]
@@ -1009,12 +1057,17 @@ public class DotNetDispatcherTest
         [JSInvokable] public TValue EchoParameter(TValue input) => input;
     }
 
+    public class MultipleJSInvokableAttributes
+    {
+        [JSInvokable, JSInvokable("Alias")] public string MultipleJSInvokableAttributesInstance(string input) => input;
+    }
+
     public class GenericMethodClass
     {
         [JSInvokable("StaticGenericMethod")] public static string StaticGenericMethod<TValue>(TValue input) => input.ToString();
         [JSInvokable("InstanceGenericMethod")] public string GenericMethod<TValue>(TValue input) => input.ToString();
     }
-
+   
     public class TestJSRuntime : JSInProcessRuntime
     {
         private TaskCompletionSource _nextInvocationTcs = new TaskCompletionSource();

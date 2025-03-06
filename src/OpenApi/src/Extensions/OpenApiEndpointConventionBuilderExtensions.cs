@@ -24,6 +24,10 @@ public static class OpenApiEndpointConventionBuilderExtensions
     /// Adds an OpenAPI annotation to <see cref="Endpoint.Metadata" /> associated
     /// with the current endpoint.
     /// </summary>
+    /// <remarks>
+    /// This method does not integrate with built-in OpenAPI document generation support in ASP.NET Core
+    /// and is primarily intended for consumption along-side Swashbuckle.AspNetCore.
+    /// </remarks>
     /// <param name="builder">The <see cref="IEndpointConventionBuilder"/>.</param>
     /// <returns>A <see cref="IEndpointConventionBuilder"/> that can be used to further customize the endpoint.</returns>
     [RequiresDynamicCode(TrimWarningMessage)]
@@ -38,6 +42,10 @@ public static class OpenApiEndpointConventionBuilderExtensions
     /// Adds an OpenAPI annotation to <see cref="Endpoint.Metadata" /> associated
     /// with the current endpoint and modifies it with the given <paramref name="configureOperation"/>.
     /// </summary>
+    /// <remarks>
+    /// This method does not integrate with built-in OpenAPI document generation support in ASP.NET Core
+    /// and is primarily intended for consumption along-side Swashbuckle.AspNetCore.
+    /// </remarks>
     /// <param name="builder">The <see cref="IEndpointConventionBuilder"/>.</param>
     /// <param name="configureOperation">An <see cref="Func{T, TResult}"/> that returns a new OpenAPI annotation given a generated operation.</param>
     /// <returns>A <see cref="IEndpointConventionBuilder"/> that can be used to further customize the endpoint.</returns>
@@ -112,5 +120,18 @@ public static class OpenApiEndpointConventionBuilderExtensions
                 routeEndpointBuilder.Metadata.Add(newOperation);
             }
         }
+    }
+
+    /// <summary>
+    /// Adds an OpenAPI operation transformer to the <see cref="EndpointBuilder.Metadata" /> associated
+    /// with the current endpoint.
+    /// </summary>
+    /// <param name="builder">The <see cref="IEndpointConventionBuilder"/>.</param>
+    /// <param name="transformer">The <see cref="Func{OpenApiOperation, OpenApiOperationTransformerContext, CancellationToken, Task}"/> that modifies the operation in the <see cref="OpenApiDocument"/>.</param>
+    /// <returns>A <see cref="IEndpointConventionBuilder"/> that can be used to further customize the endpoint.</returns>
+    public static TBuilder AddOpenApiOperationTransformer<TBuilder>(this TBuilder builder, Func<OpenApiOperation, OpenApiOperationTransformerContext, CancellationToken, Task> transformer) where TBuilder : IEndpointConventionBuilder
+    {
+        builder.WithMetadata(new DelegateOpenApiOperationTransformer(transformer));
+        return builder;
     }
 }

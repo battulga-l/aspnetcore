@@ -38,8 +38,6 @@ namespace Microsoft.AspNetCore.Http;
 [RequiresDynamicCode("RequestDelegateFactory performs object creation, serialization and deserialization on the delegates and its parameters. This cannot be statically analyzed.")]
 public static partial class RequestDelegateFactory
 {
-    private static readonly ParameterBindingMethodCache ParameterBindingMethodCache = new();
-
     private static readonly MethodInfo ExecuteTaskWithEmptyResultMethod = typeof(RequestDelegateFactory).GetMethod(nameof(ExecuteTaskWithEmptyResult), BindingFlags.NonPublic | BindingFlags.Static)!;
     private static readonly MethodInfo ExecuteValueTaskWithEmptyResultMethod = typeof(RequestDelegateFactory).GetMethod(nameof(ExecuteValueTaskWithEmptyResult), BindingFlags.NonPublic | BindingFlags.Static)!;
     private static readonly MethodInfo ExecuteTaskOfTMethod = typeof(RequestDelegateFactory).GetMethod(nameof(ExecuteTaskOfT), BindingFlags.NonPublic | BindingFlags.Static)!;
@@ -54,6 +52,7 @@ public static partial class RequestDelegateFactory
     private static readonly MethodInfo ExecuteTaskResultOfTMethod = typeof(RequestDelegateFactory).GetMethod(nameof(ExecuteTaskResult), BindingFlags.NonPublic | BindingFlags.Static)!;
     private static readonly MethodInfo ExecuteValueResultTaskOfTMethod = typeof(RequestDelegateFactory).GetMethod(nameof(ExecuteValueTaskResult), BindingFlags.NonPublic | BindingFlags.Static)!;
     private static readonly MethodInfo ExecuteAwaitedReturnMethod = typeof(RequestDelegateFactory).GetMethod(nameof(ExecuteAwaitedReturn), BindingFlags.NonPublic | BindingFlags.Static)!;
+    private static readonly MethodInfo GetHeaderSplitMethod = typeof(ParsingHelpers).GetMethod(nameof(ParsingHelpers.GetHeaderSplit), BindingFlags.Public | BindingFlags.Static, [typeof(IHeaderDictionary), typeof(string)])!;
     private static readonly MethodInfo GetRequiredServiceMethod = typeof(ServiceProviderServiceExtensions).GetMethod(nameof(ServiceProviderServiceExtensions.GetRequiredService), BindingFlags.Public | BindingFlags.Static, new Type[] { typeof(IServiceProvider) })!;
     private static readonly MethodInfo GetServiceMethod = typeof(ServiceProviderServiceExtensions).GetMethod(nameof(ServiceProviderServiceExtensions.GetService), BindingFlags.Public | BindingFlags.Static, new Type[] { typeof(IServiceProvider) })!;
     private static readonly MethodInfo GetRequiredKeyedServiceMethod = typeof(ServiceProviderKeyedServiceExtensions).GetMethod(nameof(ServiceProviderKeyedServiceExtensions.GetRequiredKeyedService), BindingFlags.Public | BindingFlags.Static, new Type[] { typeof(IServiceProvider), typeof(object) })!;
@@ -126,7 +125,7 @@ public static partial class RequestDelegateFactory
     private static readonly MethodInfo AsMemoryMethod = new Func<char[]?, int, int, Memory<char>>(MemoryExtensions.AsMemory).Method;
     private static readonly MethodInfo ArrayPoolSharedReturnMethod = typeof(ArrayPool<char>).GetMethod(nameof(ArrayPool<char>.Shared.Return))!;
 
-    private static readonly string[] DefaultAcceptsAndProducesContentType = new[] { JsonConstants.JsonContentType };
+    private static readonly string[] DefaultAcceptsAndProducesContentType = new[] { ContentTypeConstants.JsonContentType };
     private static readonly string[] FormFileContentType = new[] { "multipart/form-data" };
     private static readonly string[] FormContentType = new[] { "multipart/form-data", "application/x-www-form-urlencoded" };
     private static readonly string[] PlaintextContentType = new[] { "text/plain" };
@@ -276,7 +275,7 @@ public static partial class RequestDelegateFactory
         var serviceProvider = options?.ServiceProvider ?? options?.EndpointBuilder?.ApplicationServices ?? EmptyServiceProvider.Instance;
         var endpointBuilder = options?.EndpointBuilder ?? new RdfEndpointBuilder(serviceProvider);
         var jsonSerializerOptions = serviceProvider.GetService<IOptions<JsonOptions>>()?.Value.SerializerOptions ?? JsonOptions.DefaultSerializerOptions;
-        var formDataMapperOptions = new FormDataMapperOptions();;
+        var formDataMapperOptions = new FormDataMapperOptions();
 
         var factoryContext = new RequestDelegateFactoryContext
         {
@@ -545,6 +544,11 @@ public static partial class RequestDelegateFactory
             }
         }
 
+        if (returnType.IsValueType)
+        {
+            return Expression.Call(WrapObjectAsValueTaskMethod, Expression.Convert(methodCall, typeof(object)));
+        }
+
         return Expression.Call(WrapObjectAsValueTaskMethod, methodCall);
     }
 
@@ -648,8 +652,18 @@ public static partial class RequestDelegateFactory
 
         for (var i = 0; i < parameters.Length; i++)
         {
-            args[i] = CreateArgument(parameters[i], factoryContext);
+            args[i] = CreateArgument(parameters[i], factoryContext, out var hasTryParse, out var hasBindAsync, out var isAsParameters);
 
+            if (!isAsParameters)
+            {
+                factoryContext.EndpointBuilder.Metadata.Add(new ParameterBindingMetadata(
+                    name: parameters[i].Name!,
+                    parameterInfo: parameters[i],
+                    hasTryParse: hasTryParse,
+                    hasBindAsync: hasBindAsync,
+                    isOptional: IsOptionalParameter(parameters[i], factoryContext)
+                ));
+            }
             factoryContext.ArgumentTypes[i] = parameters[i].ParameterType;
             factoryContext.BoxedArgs[i] = Expression.Convert(args[i], typeof(object));
         }
@@ -675,8 +689,11 @@ public static partial class RequestDelegateFactory
         return args;
     }
 
-    private static Expression CreateArgument(ParameterInfo parameter, RequestDelegateFactoryContext factoryContext)
+    private static Expression CreateArgument(ParameterInfo parameter, RequestDelegateFactoryContext factoryContext, out bool hasTryParse, out bool hasBindAsync, out bool isAsParameters)
     {
+        hasTryParse = false;
+        hasBindAsync = false;
+        isAsParameters = false;
         if (parameter.Name is null)
         {
             throw new InvalidOperationException($"Encountered a parameter of type '{parameter.ParameterType}' without a name. Parameters must have a name.");
@@ -770,8 +787,9 @@ public static partial class RequestDelegateFactory
             var useSimpleBinding = parameter.ParameterType == typeof(string) ||
                 parameter.ParameterType == typeof(StringValues) ||
                 parameter.ParameterType == typeof(StringValues?) ||
-                ParameterBindingMethodCache.HasTryParseMethod(parameter.ParameterType) ||
-                (parameter.ParameterType.IsArray && ParameterBindingMethodCache.HasTryParseMethod(parameter.ParameterType.GetElementType()!));
+                ParameterBindingMethodCache.Instance.HasTryParseMethod(parameter.ParameterType) ||
+                (parameter.ParameterType.IsArray && ParameterBindingMethodCache.Instance.HasTryParseMethod(parameter.ParameterType.GetElementType()!));
+            hasTryParse = useSimpleBinding;
             return useSimpleBinding
                 ? BindParameterFromFormItem(parameter, formAttribute.Name ?? parameter.Name, factoryContext)
                 : BindComplexParameterFromFormItem(parameter, string.IsNullOrEmpty(formAttribute.Name) ? parameter.Name : formAttribute.Name, factoryContext);
@@ -797,6 +815,7 @@ public static partial class RequestDelegateFactory
         }
         else if (parameterCustomAttributes.OfType<AsParametersAttribute>().Any())
         {
+            isAsParameters = true;
             if (parameter is PropertyAsParameterInfo)
             {
                 throw new NotSupportedException(
@@ -845,12 +864,14 @@ public static partial class RequestDelegateFactory
         {
             return RequestPipeReaderExpr;
         }
-        else if (ParameterBindingMethodCache.HasBindAsyncMethod(parameter))
+        else if (ParameterBindingMethodCache.Instance.HasBindAsyncMethod(parameter))
         {
+            hasBindAsync = true;
             return BindParameterFromBindAsync(parameter, factoryContext);
         }
-        else if (parameter.ParameterType == typeof(string) || ParameterBindingMethodCache.HasTryParseMethod(parameter.ParameterType))
+        else if (parameter.ParameterType == typeof(string) || ParameterBindingMethodCache.Instance.HasTryParseMethod(parameter.ParameterType))
         {
+            hasTryParse = true;
             // 1. We bind from route values only, if route parameters are non-null and the parameter name is in that set.
             // 2. We bind from query only, if route parameters are non-null and the parameter name is NOT in that set.
             // 3. Otherwise, we fallback to route or query if route parameters is null (it means we don't know what route parameters are defined). This case only happens
@@ -878,10 +899,10 @@ public static partial class RequestDelegateFactory
             parameter.ParameterType == typeof(string[]) ||
                  parameter.ParameterType == typeof(StringValues) ||
                  parameter.ParameterType == typeof(StringValues?) ||
-                (parameter.ParameterType.IsArray && ParameterBindingMethodCache.HasTryParseMethod(parameter.ParameterType.GetElementType()!))))
+                (parameter.ParameterType.IsArray && ParameterBindingMethodCache.Instance.HasTryParseMethod(parameter.ParameterType.GetElementType()!))))
         {
             // We only infer parameter types if you have an array of TryParsables/string[]/StringValues/StringValues?, and DisableInferredFromBody is true
-
+            hasTryParse = true;
             factoryContext.TrackedParameters.Add(parameter.Name, RequestDelegateFactoryConstants.QueryStringParameter);
             return BindParameterFromProperty(parameter, QueryExpr, QueryIndexerProperty, parameter.Name, factoryContext, "query string");
         }
@@ -1009,20 +1030,26 @@ public static partial class RequestDelegateFactory
             throw GetUnsupportedReturnTypeException(returnType);
         }
 
+        var isAwaitable = false;
         if (CoercedAwaitableInfo.IsTypeAwaitable(returnType, out var coercedAwaitableInfo))
         {
             returnType = coercedAwaitableInfo.AwaitableInfo.ResultType;
+            isAwaitable = true;
         }
 
         // Skip void returns and IResults. IResults might implement IEndpointMetadataProvider but otherwise we don't know what it might do.
-        if (returnType == typeof(void) || typeof(IResult).IsAssignableFrom(returnType))
+        if (!isAwaitable && (returnType == typeof(void) || typeof(IResult).IsAssignableFrom(returnType)))
         {
             return;
         }
 
         if (returnType == typeof(string))
         {
-            builder.Metadata.Add(ProducesResponseTypeMetadata.CreateUnvalidated(type: null, statusCode: 200, PlaintextContentType));
+            builder.Metadata.Add(ProducesResponseTypeMetadata.CreateUnvalidated(type: typeof(string), statusCode: 200, PlaintextContentType));
+        }
+        else if (returnType == typeof(void))
+        {
+            builder.Metadata.Add(ProducesResponseTypeMetadata.CreateUnvalidated(returnType, statusCode: 200, PlaintextContentType));
         }
         else
         {
@@ -1542,7 +1569,7 @@ public static partial class RequestDelegateFactory
         }
 
         var argumentExpression = Expression.Variable(parameter.ParameterType, $"{parameter.Name}_local");
-        var (constructor, parameters) = ParameterBindingMethodCache.FindConstructor(parameterType);
+        var (constructor, parameters) = ParameterBindingMethodCache.Instance.FindConstructor(parameterType);
 
         Expression initExpression;
 
@@ -1556,8 +1583,10 @@ public static partial class RequestDelegateFactory
             {
                 var parameterInfo =
                     new PropertyAsParameterInfo(parameters[i].PropertyInfo, parameters[i].ParameterInfo, factoryContext.NullabilityContext);
-                constructorArguments[i] = CreateArgument(parameterInfo, factoryContext);
+                Debug.Assert(parameterInfo.Name != null, "Parameter name must be set for parameters resolved from properties.");
+                constructorArguments[i] = CreateArgument(parameterInfo, factoryContext, out var hasTryParse, out var hasBindAsync, out var _);
                 factoryContext.Parameters.Add(parameterInfo);
+                factoryContext.EndpointBuilder.Metadata.Add(new ParameterBindingMetadata(parameterInfo.Name, parameterInfo, hasTryParse: hasTryParse, hasBindAsync: hasBindAsync, isOptional: parameterInfo.IsOptional));
             }
 
             initExpression = Expression.New(constructor, constructorArguments);
@@ -1579,8 +1608,10 @@ public static partial class RequestDelegateFactory
                 if (properties[i].CanWrite && properties[i].GetSetMethod(nonPublic: false) != null)
                 {
                     var parameterInfo = new PropertyAsParameterInfo(properties[i], factoryContext.NullabilityContext);
-                    bindings.Add(Expression.Bind(properties[i], CreateArgument(parameterInfo, factoryContext)));
+                    Debug.Assert(parameterInfo.Name != null, "Parameter name must be set for parameters resolved from properties.");
+                    bindings.Add(Expression.Bind(properties[i], CreateArgument(parameterInfo, factoryContext, out var hasTryParse, out var hasBindAsync, out var _)));
                     factoryContext.Parameters.Add(parameterInfo);
+                    factoryContext.EndpointBuilder.Metadata.Add(new ParameterBindingMetadata(parameterInfo.Name, parameterInfo, hasTryParse: hasTryParse, hasBindAsync: hasBindAsync, isOptional: parameterInfo.IsOptional));
                 }
             }
 
@@ -1649,7 +1680,7 @@ public static partial class RequestDelegateFactory
         var isNotNullable = underlyingNullableType is null;
 
         var nonNullableParameterType = underlyingNullableType ?? targetParseType;
-        var tryParseMethodCall = ParameterBindingMethodCache.FindTryParseMethod(nonNullableParameterType);
+        var tryParseMethodCall = ParameterBindingMethodCache.Instance.FindTryParseMethod(nonNullableParameterType);
 
         if (tryParseMethodCall is null)
         {
@@ -1925,8 +1956,14 @@ public static partial class RequestDelegateFactory
                 Expression.Convert(Expression.Constant(parameter.DefaultValue), parameter.ParameterType)));
     }
 
-    private static Expression BindParameterFromProperty(ParameterInfo parameter, MemberExpression property, PropertyInfo itemProperty, string key, RequestDelegateFactoryContext factoryContext, string source) =>
-        BindParameterFromValue(parameter, GetValueFromProperty(property, itemProperty, key, GetExpressionType(parameter.ParameterType)), factoryContext, source);
+    private static Expression BindParameterFromProperty(ParameterInfo parameter, MemberExpression property, PropertyInfo itemProperty, string key, RequestDelegateFactoryContext factoryContext, string source)
+    {
+        var valueExpression = (source == "header" && parameter.ParameterType.IsArray)
+            ? Expression.Call(GetHeaderSplitMethod, property, Expression.Constant(key))
+            : GetValueFromProperty(property, itemProperty, key, GetExpressionType(parameter.ParameterType));
+
+        return BindParameterFromValue(parameter, valueExpression, factoryContext, source);
+    }
 
     private static Type? GetExpressionType(Type type) =>
         type.IsArray ? typeof(string[]) :
@@ -1947,7 +1984,7 @@ public static partial class RequestDelegateFactory
         var isOptional = IsOptionalParameter(parameter, factoryContext);
 
         // Get the BindAsync method for the type.
-        var bindAsyncMethod = ParameterBindingMethodCache.FindBindAsyncMethod(parameter);
+        var bindAsyncMethod = ParameterBindingMethodCache.Instance.FindBindAsyncMethod(parameter);
         // We know BindAsync exists because there's no way to opt-in without defining the method on the type.
         Debug.Assert(bindAsyncMethod.Expression is not null);
 
